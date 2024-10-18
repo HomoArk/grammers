@@ -181,8 +181,10 @@ impl Enqueuer {
             state: RequestState::NotSerialized,
             result: tx,
         }) {
+            debug!("failed to enqueue request: {}", err);
             err.0.result.send(Err(InvocationError::Dropped)).unwrap();
         }
+        debug!("enqueued request {}", tl::name_for_id(req_id));
         rx
     }
 }
@@ -309,7 +311,9 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             Write(io::Result<usize>),
         }
 
+        trace!("[xiangyi] Sender::step invoked");
         self.try_fill_write();
+        trace!("[xiangyi] Sender::step try_fill_write done");
         let write_len = self.write_buffer.len() - self.write_head;
         trace!(
             "reading bytes and sending up to {} bytes via network",
@@ -408,8 +412,11 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     /// Setup the write buffer for the transport, unless a write is already pending.
     fn try_fill_write(&mut self) {
         if !self.write_buffer.is_empty() {
+            trace!("[xiangyi] try_fill_write: write buffer is not empty, skipping");
             return;
         }
+
+        trace!("[xiangyi] try_fill_write: write buffer is empty, serializing {} requests", self.requests.len());
 
         // TODO add a test to make sure we only ever send the same request once
         for request in self
@@ -417,8 +424,10 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
             .iter_mut()
             .filter(|r| matches!(r.state, RequestState::NotSerialized))
         {
+            trace!("[xiangyi] try_fill_write: serializing request {:?}", request.body);
             // TODO make mtp itself use BytesMut to avoid copies
             if let Some(msg_id) = self.mtp.push(&mut self.write_buffer, &request.body) {
+                trace!("[xiangyi] try_fill_write: is MsgId");
                 assert!(request.body.len() >= 4);
                 let req_id = u32::from_le_bytes([
                     request.body[0],
@@ -437,20 +446,41 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 // (e.g. infinite loops leading to transport flood.)
                 request.state = RequestState::Serialized(MsgIdPair::new(msg_id));
             } else {
+                trace!("[xiangyi] try_fill_write: not MsgId");
                 break;
             }
         }
 
+        trace!(
+            "[xiangyi] try_fill_write: serialized {} requests, finalizing",
+            self.requests.len()
+        );
+
         if let Some(container_msg_id) = self.mtp.finalize(&mut self.write_buffer) {
+            trace!("[xiangyi] try_fill_write: mtp.finalize result is container MsgId");
             for request in self.requests.iter_mut() {
                 match request.state {
                     RequestState::Serialized(ref mut pair) => {
+                        trace!("[xiangyi] try_fill_write: request {:?} is serialized", request.body);
                         pair.container_msg_id = container_msg_id;
                     }
-                    RequestState::NotSerialized | RequestState::Sent(..) => {}
+                    RequestState::NotSerialized | RequestState::Sent(..) => {
+                        trace!(
+                            "[xiangyi] try_fill_write: request {:?} is not serialized or already sent",
+                            request.body
+                        );
+                    }
                 }
             }
-            self.transport.pack(&mut self.write_buffer)
+            trace!(
+                "[xiangyi] try_fill_write: finalized write buffer with container MsgId"
+            );
+            self.transport.pack(&mut self.write_buffer);
+            trace!(
+                "[xiangyi] try_fill_write: packed write buffer with container MsgId"
+            );
+        } else {
+            trace!("[xiangyi] try_fill_write: finalized write buffer with container MsgId");
         }
     }
 
