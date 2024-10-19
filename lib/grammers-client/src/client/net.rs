@@ -416,7 +416,13 @@ impl Connection {
 
     async fn step(&self) -> Result<Vec<tl::enums::Updates>, sender::ReadError> {
         let ticket_number = self.step_counter.load(Ordering::SeqCst);
-        let mut sender = self.sender.lock().await;
+        // let mut sender = self.sender.lock().await;
+        let mut sender = loop {
+            match self.sender.try_lock() {
+                Ok(sender) => break sender,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        };
         match self.step_counter.compare_exchange(
             ticket_number,
             // As long as the counter's modulo is larger than the amount of concurrent tasks, we're fine.
